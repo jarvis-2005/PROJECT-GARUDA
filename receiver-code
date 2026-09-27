@@ -1,0 +1,168 @@
+
+#include <SPI.h>
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <UniversalTelegramBot.h>
+#include <RadioLib.h>
+
+// =========================
+// WiFi Credentials
+// =========================
+const char* ssid = "Galaxy_A37";
+const char* password = "surya@123";
+
+// =========================
+// Telegram
+// =========================
+#define BOT_TOKEN "8903495893:AAEMqqkJfli-BqvQPBVYEJk6aTEffSjxrRA"
+#define CHAT_ID   "2108164782"
+
+WiFiClientSecure client;
+UniversalTelegramBot bot(BOT_TOKEN, client);
+
+// =========================
+// LoRa Module
+// =========================
+SX1276 radio = new Module(15, 4, 17, 33);
+
+// =========================
+// Connect WiFi
+// =========================
+void connectWiFi() {
+
+  Serial.print("Connecting to WiFi");
+
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println();
+  Serial.println("WiFi Connected");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+
+}
+
+// =========================
+// Telegram Function
+// =========================
+void sendTelegram(String text) {
+
+  if (WiFi.status() != WL_CONNECTED) {
+    connectWiFi();
+  }
+
+  Serial.println("Sending Telegram...");
+
+  if (bot.sendMessage(CHAT_ID, text, "")) {
+    Serial.println("Telegram Sent");
+  } else {
+    Serial.println("Telegram Failed");
+  }
+
+}
+
+void setup() {
+
+  Serial.begin(115200);
+
+  SPI.begin(14, 12, 13, 15);
+
+  connectWiFi();
+
+  client.setInsecure();
+
+  Serial.println("Central Receiver");
+
+  int state = radio.begin(866.0);
+
+  if (state != RADIOLIB_ERR_NONE) {
+
+    Serial.print("LoRa Failed: ");
+    Serial.println(state);
+
+    while (true);
+
+  }
+
+  Serial.println("LoRa Ready");
+  Serial.println("Waiting...");
+
+}
+
+void loop() {
+
+  String msg;
+
+  int state = radio.receive(msg);
+
+  if (state == RADIOLIB_ERR_NONE) {
+
+    Serial.println("====================");
+    Serial.print("Received: ");
+    Serial.println(msg);
+
+    if (msg == "GATE1_OPEN") {
+
+      Serial.println("Gate 1 Opened");
+
+      sendTelegram("🚨 ALERT\nGate 1 Opened");
+
+    }
+
+    else if (msg == "GATE1_CLOSED") {
+
+      Serial.println("Gate 1 Closed");
+
+      sendTelegram("✅ Gate 1 Closed");
+
+    }
+
+    else if (msg == "GATE2_OPEN") {
+
+      Serial.println("Gate 2 Opened");
+
+      sendTelegram("🚨 ALERT\nGate 2 Opened");
+
+    }
+
+    else if (msg == "GATE2_CLOSED") {
+
+      Serial.println("Gate 2 Closed");
+
+      sendTelegram("✅ Gate 2 Closed");
+
+    }
+
+    else if (msg == "GATE3_OPEN") {
+
+      Serial.println("Gate 3 Opened");
+
+      sendTelegram("🚨 ALERT\nGate 3 Opened");
+
+    }
+
+    else if (msg == "GATE3_CLOSED") {
+
+      Serial.println("Gate 3 Closed");
+
+      sendTelegram("✅ Gate 3 Closed");
+
+    }
+
+    Serial.print("RSSI: ");
+    Serial.print(radio.getRSSI());
+    Serial.println(" dBm");
+
+    Serial.print("SNR: ");
+    Serial.print(radio.getSNR());
+    Serial.println(" dB");
+
+    Serial.println("====================");
+
+  }
+
+}
