@@ -1,0 +1,58 @@
+#include <SPI.h>
+#include <RadioLib.h>
+
+#define REED_PIN 25
+
+// NSS, DIO0, RESET, DIO1
+SX1276 radio = new Module(15, 4, 17, 33);
+
+bool previousState = LOW;
+
+void setup() {
+
+  Serial.begin(115200);
+
+  pinMode(REED_PIN, INPUT_PULLUP);
+
+  SPI.begin(14,12,13,15);
+
+  Serial.println("Initializing LoRa...");
+
+  int state = radio.begin(866.0);
+
+  if(state != RADIOLIB_ERR_NONE){
+    Serial.print("LoRa Failed : ");
+    Serial.println(state);
+    while(true);
+  }
+
+  Serial.println("Gate Node Ready");
+}
+
+void loop() {
+
+  bool gateState = digitalRead(REED_PIN);
+
+  if(gateState != previousState){
+
+      if(gateState == LOW){
+
+          Serial.println("Gate Opened");
+
+          int state = radio.transmit("GATE1_OPEN");
+
+          if(state == RADIOLIB_ERR_NONE)
+              Serial.println("Alert Sent");
+      }
+      else{
+
+          Serial.println("Gate Closed");
+
+          radio.transmit("GATE1_CLOSED");
+      }
+
+      previousState = gateState;
+  }
+
+  delay(50);
+}
