@@ -1,0 +1,219 @@
+
+from flask import Flask, request, jsonify
+import sqlite3
+import requests
+from datetime import datetime
+
+app = Flask(__name__)
+
+# ==============================
+# CONFIGURATION
+# ==============================
+
+DATABASE = "security.db"
+
+TELEGRAM_BOT_TOKEN = "8903495893:AAEMqqkJfli-BqvQPBVYEJk6aTEffSjxrRA"
+TELEGRAM_CHAT_ID = ""2108164782"
+
+
+# ==============================
+# DATABASE
+# ==============================
+
+def init_db():
+    conn = sqlite3.connect(DATABASE)
+
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            gate INTEGER,
+            status TEXT,
+            time TEXT
+        )
+    """)
+
+    conn.commit()
+    conn.close()
+
+
+# ==============================
+# TELEGRAM MESSAGE
+# ==============================
+
+def send_telegram_message(message):
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+
+    data = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message
+    }
+
+    try:
+        response = requests.post(url, data=data)
+
+        if response.status_code == 200:
+            print("Telegram notification sent successfully")
+        else:
+            print("Telegram error:", response.text)
+
+    except Exception as e:
+        print("Telegram connection error:", e)
+
+
+# ==============================
+# HOME
+# ==============================
+
+@app.route("/")
+def home():
+
+    return """
+    <h1>GARUDA Security Server</h1>
+    <p>Phase 3 Server is running.</p>
+    <p>Waiting for gate alerts...</p>
+    """
+
+
+# ==============================
+# ALERT API
+# ==============================
+
+@app.route("/alert", methods=["POST"])
+def alert():
+
+    data = request.get_json()
+
+    if not data:
+        return jsonify({
+            "error": "No JSON data received"
+        }), 400
+
+    gate = data.get("gate")
+    status = data.get("status")
+
+    if gate is None or status is None:
+        return jsonify({
+            "error": "gate and status are required"
+        }), 400
+
+    # Current time
+    current_time = datetime.now().strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+    # ==========================
+    # SAVE EVENT TO SQLITE
+    # ==========================
+
+    conn = sqlite3.connect(DATABASE)
+
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        INSERT INTO events (gate, status, time)
+        VALUES (?, ?, ?)
+    """, (gate, status, current_time))
+
+    event_id = cursor.lastrowid
+
+    conn.commit()
+    conn.close()
+
+    # ==========================
+    # TELEGRAM ALERT
+    # ==========================
+
+    message = f"""🚨 GARUDA SECURITY ALERT 🚨
+
+Gate: {gate}
+Status: {status}
+Time: {current_time}
+
+⚠️ Intrusion detected at Gate {gate}.
+"""
+
+    send_telegram_message(message)
+
+    # ==========================
+    # SERVER TERMINAL OUTPUT
+    # ==========================
+
+    print("\n==============================")
+    print("GARUDA SECURITY EVENT")
+    print("==============================")
+    print("Event ID :", event_id)
+    print("Gate     :", gate)
+    print("Status   :", status)
+    print("Time     :", current_time)
+    print("==============================\n")
+
+    return jsonify({
+        "message": "Alert received successfully",
+        "event_id": event_id,
+        "gate": gate,
+        "status": status,
+        "time": current_time
+    })
+
+
+# ==============================
+# VIEW EVENTS
+# ==============================
+
+@app.route("/events", methods=["GET"])
+def get_events():
+
+    conn = sqlite3.connect(DATABASE)
+
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT id, gate, status, time
+        FROM events
+        ORDER BY id DESC
+    """)
+
+    rows = cursor.fetchall()
+
+    conn.close()
+
+    events = []
+
+    for row in rows:
+
+        events.append({
+            "id": row[0],
+            "gate": row[1],
+            "status": row[2],
+            "time": row[3]
+        })
+
+    return jsonify(events)
+
+
+# ==============================
+# RUN SERVER
+# ==============================
+
+if __name__ == "__main__":
+
+    init_db()
+
+    print("\n====================================")
+    print(" GARUDA PHASE 3 SERVER")
+    print("====================================")
+    print("Flask Server : http://127.0.0.1:5000")
+    print("Alert API    : /alert")
+    print("Events API   : /events")
+    print("Telegram Bot : Enabled")
+    print("Database     : security.db")
+    print("====================================\n")
+
+    app.run(
+        host="0.0.0.0",
+        port=5000,
+        debug=True
+    )
