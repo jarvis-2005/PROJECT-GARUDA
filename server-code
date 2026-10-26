@@ -1,219 +1,721 @@
-
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template_string
 import sqlite3
-import requests
 from datetime import datetime
 
 app = Flask(__name__)
 
-# ==============================
-# CONFIGURATION
-# ==============================
-
 DATABASE = "security.db"
 
-TELEGRAM_BOT_TOKEN = "8903495893:AAEMqqkJfli-BqvQPBVYEJk6aTEffSjxrRA"
-TELEGRAM_CHAT_ID = ""2108164782"
 
-
-# ==============================
+# =========================================================
 # DATABASE
-# ==============================
+# =========================================================
 
-def init_db():
+def get_connection():
     conn = sqlite3.connect(DATABASE)
+    conn.row_factory = sqlite3.Row
+    return conn
 
+
+def create_database():
+    conn = get_connection()
     cursor = conn.cursor()
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            gate INTEGER,
+            gate TEXT,
             status TEXT,
-            time TEXT
+            time TEXT,
+            drone_status TEXT DEFAULT 'PENDING'
         )
     """)
+
+    # Support databases created before drone_status existed.
+    columns = [
+        row["name"]
+        for row in cursor.execute(
+            "PRAGMA table_info(events)"
+        ).fetchall()
+    ]
+
+    if "drone_status" not in columns:
+        cursor.execute("""
+            ALTER TABLE events
+            ADD COLUMN drone_status TEXT DEFAULT 'PENDING'
+        """)
 
     conn.commit()
     conn.close()
 
 
-# ==============================
-# TELEGRAM MESSAGE
-# ==============================
+create_database()
 
-def send_telegram_message(message):
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+# =========================================================
+# GARUDA / GATEWATCH DASHBOARD HTML
+# =========================================================
 
-    data = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message
+DASHBOARD_HTML = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>GARUDA | Security Command Center</title>
+
+    <style>
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+            background: #0b1120;
+            color: #e5edf8;
+        }
+
+        header {
+            padding: 22px 5%;
+            background: #111c30;
+            border-bottom: 1px solid #27364d;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 15px;
+            flex-wrap: wrap;
+        }
+
+        header h1 {
+            margin: 0;
+            font-size: 25px;
+            letter-spacing: 1px;
+        }
+
+        header p {
+            color: #91a4c0;
+            margin: 6px 0 0;
+            font-size: 13px;
+        }
+
+        .status {
+            color: #6ee7b7;
+            font-size: 13px;
+        }
+
+        main {
+            max-width: 1200px;
+            margin: auto;
+            padding: 28px 20px;
+        }
+
+        .section-title {
+            font-size: 19px;
+            margin: 10px 0 18px;
+        }
+
+        .cards {
+            display: grid;
+            grid-template-columns: repeat(
+                auto-fit, minmax(180px, 1fr)
+            );
+            gap: 16px;
+        }
+
+        .card {
+            background: #131f33;
+            border: 1px solid #263650;
+            border-radius: 14px;
+            padding: 22px;
+        }
+
+        .card .label {
+            color: #9aacc5;
+            font-size: 13px;
+        }
+
+        .card .number {
+            font-size: 30px;
+            font-weight: bold;
+            margin-top: 12px;
+        }
+
+        .green { color: #6ee7b7; }
+        .red { color: #fca5a5; }
+        .yellow { color: #fcd34d; }
+
+        .panel {
+            margin-top: 25px;
+            padding: 22px;
+            background: #131f33;
+            border: 1px solid #263650;
+            border-radius: 14px;
+        }
+
+        .panel h2 {
+            font-size: 18px;
+            margin-top: 0;
+        }
+
+        .table-wrap {
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            min-width: 600px;
+        }
+
+        th, td {
+            padding: 13px 12px;
+            border-bottom: 1px solid #263650;
+            text-align: left;
+            font-size: 13px;
+        }
+
+        th {
+            color: #9aacc5;
+            font-weight: normal;
+        }
+
+        .empty {
+            color: #91a4c0;
+            padding: 20px 0;
+        }
+
+        button {
+            background: #0f766e;
+            color: white;
+            border: 0;
+            border-radius: 8px;
+            padding: 11px 16px;
+            cursor: pointer;
+        }
+
+        button:hover { background: #115e59; }
+
+        footer {
+            padding: 25px;
+            text-align: center;
+            color: #71839d;
+            font-size: 12px;
+        }
+    </style>
+</head>
+
+<body>
+<header>
+    <div>
+        <h1>GARUDA <span style="color:#5eead4">/</span> GATEWATCH</h1>
+        <p>Sensor-Triggered Security Monitoring System</p>
+    </div>
+
+    <div class="status" id="serverStatus">
+        ● Connecting to server...
+    </div>
+</header>
+
+<main>
+    <h2 class="section-title">Security Overview</h2>
+
+    <section class="cards">
+        <div class="card">
+            <div class="label">Total Events</div>
+            <div class="number" id="totalEvents">—</div>
+        </div>
+
+        <div class="card">
+            <div class="label">Gate 1 Events</div>
+            <div class="number" id="gate1">—</div>
+        </div>
+
+        <div class="card">
+            <div class="label">Gate 2 Events</div>
+            <div class="number" id="gate2">—</div>
+        </div>
+
+        <div class="card">
+            <div class="label">Gate 3 Events</div>
+            <div class="number" id="gate3">—</div>
+        </div>
+    </section>
+
+    <section class="panel">
+        <h2>Recent Gate Events</h2>
+
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Event ID</th>
+                        <th>Gate</th>
+                        <th>Status</th>
+                        <th>Time</th>
+                        <th>Drone Status</th>
+                    </tr>
+                </thead>
+
+                <tbody id="eventsBody">
+                    <tr>
+                        <td colspan="5">Loading events...</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <section class="panel">
+        <h2>Drone Mission Interface</h2>
+
+        <p>
+            This interface displays the mission queue.
+            It does not itself control or arm the aircraft.
+        </p>
+
+        <button onclick="loadEvents()">Refresh Data</button>
+
+        <p id="missionInfo" class="empty">
+            Mission status will appear here.
+        </p>
+    </section>
+</main>
+
+<footer>
+    GARUDA Security System · Local monitoring dashboard
+</footer>
+
+<script>
+async function loadEvents() {
+    const serverStatus = document.getElementById("serverStatus");
+
+    try {
+        const response = await fetch(
+            "/events",
+            { cache: "no-store" }
+        );
+
+        if (!response.ok) {
+            throw new Error("HTTP " + response.status);
+        }
+
+        const events = await response.json();
+
+        serverStatus.textContent = "● Server Connected";
+        serverStatus.style.color = "#6ee7b7";
+
+        document.getElementById("totalEvents").textContent =
+            events.length;
+
+        document.getElementById("gate1").textContent =
+            events.filter(e =>
+                String(e.gate).toUpperCase().includes("1")
+            ).length;
+
+        document.getElementById("gate2").textContent =
+            events.filter(e =>
+                String(e.gate).toUpperCase().includes("2")
+            ).length;
+
+        document.getElementById("gate3").textContent =
+            events.filter(e =>
+                String(e.gate).toUpperCase().includes("3")
+            ).length;
+
+        const body = document.getElementById("eventsBody");
+        body.replaceChildren();
+
+        if (events.length === 0) {
+            const row = body.insertRow();
+            const cell = row.insertCell();
+
+            cell.colSpan = 5;
+            cell.className = "empty";
+            cell.textContent = "No gate events received yet.";
+        } else {
+            events.slice(0, 50).forEach(event => {
+                const row = body.insertRow();
+
+                [
+                    event.id,
+                    event.gate,
+                    event.status,
+                    event.time,
+                    event.drone_status || "PENDING"
+                ].forEach(value => {
+                    const cell = row.insertCell();
+                    cell.textContent = value ?? "";
+                });
+            });
+        }
+
+        const missionResponse = await fetch(
+            "/drone/mission",
+            { cache: "no-store" }
+        );
+
+        if (missionResponse.ok) {
+            const missionData = await missionResponse.json();
+
+            document.getElementById("missionInfo").textContent =
+                missionData.mission
+                    ? "Mission queued: " + missionData.mission +
+                      " | Event ID: " + missionData.event_id
+                    : "No new eligible drone mission.";
+        }
+
+    } catch (error) {
+        console.error("Dashboard error:", error);
+
+        serverStatus.textContent = "● Connection Error";
+        serverStatus.style.color = "#fca5a5";
+
+        document.getElementById("missionInfo").textContent =
+            "Could not load data. Check the Flask terminal.";
     }
+}
 
-    try:
-        response = requests.post(url, data=data)
-
-        if response.status_code == 200:
-            print("Telegram notification sent successfully")
-        else:
-            print("Telegram error:", response.text)
-
-    except Exception as e:
-        print("Telegram connection error:", e)
+loadEvents();
+setInterval(loadEvents, 5000);
+</script>
+</body>
+</html>
+"""
 
 
-# ==============================
-# HOME
-# ==============================
+# =========================================================
+# HOME PAGE
+# =========================================================
 
-@app.route("/")
+@app.route("/", methods=["GET"])
 def home():
-
-    return """
-    <h1>GARUDA Security Server</h1>
-    <p>Phase 3 Server is running.</p>
-    <p>Waiting for gate alerts...</p>
-    """
+    return render_template_string(DASHBOARD_HTML)
 
 
-# ==============================
-# ALERT API
-# ==============================
+# =========================================================
+# PHASE 3 — RECEIVE GATE ALERT
+# =========================================================
 
 @app.route("/alert", methods=["POST"])
-def alert():
+def receive_alert():
+    data = request.get_json(silent=True)
 
-    data = request.get_json()
-
-    if not data:
+    if not isinstance(data, dict):
         return jsonify({
-            "error": "No JSON data received"
+            "error": "Request body must be valid JSON"
         }), 400
 
     gate = data.get("gate")
     status = data.get("status")
 
-    if gate is None or status is None:
+    if not gate or not status:
         return jsonify({
-            "error": "gate and status are required"
+            "error": "Both gate and status are required"
         }), 400
 
-    # Current time
+    gate = str(gate).strip()
+    status = str(status).strip()
+
     current_time = datetime.now().strftime(
         "%Y-%m-%d %H:%M:%S"
     )
 
-    # ==========================
-    # SAVE EVENT TO SQLITE
-    # ==========================
+    conn = get_connection()
 
-    conn = sqlite3.connect(DATABASE)
+    try:
+        cursor = conn.cursor()
 
-    cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO events (gate, status, time, drone_status)
+            VALUES (?, ?, ?, 'PENDING')
+        """, (gate, status, current_time))
 
-    cursor.execute("""
-        INSERT INTO events (gate, status, time)
-        VALUES (?, ?, ?)
-    """, (gate, status, current_time))
+        event_id = cursor.lastrowid
+        conn.commit()
 
-    event_id = cursor.lastrowid
+    finally:
+        conn.close()
 
-    conn.commit()
-    conn.close()
-
-    # ==========================
-    # TELEGRAM ALERT
-    # ==========================
-
-    message = f"""🚨 GARUDA SECURITY ALERT 🚨
-
-Gate: {gate}
-Status: {status}
-Time: {current_time}
-
-⚠️ Intrusion detected at Gate {gate}.
-"""
-
-    send_telegram_message(message)
-
-    # ==========================
-    # SERVER TERMINAL OUTPUT
-    # ==========================
-
-    print("\n==============================")
-    print("GARUDA SECURITY EVENT")
-    print("==============================")
-    print("Event ID :", event_id)
-    print("Gate     :", gate)
-    print("Status   :", status)
-    print("Time     :", current_time)
-    print("==============================\n")
+    print("=" * 40)
+    print("GATE ALERT RECEIVED")
+    print("Event ID:", event_id)
+    print("Gate:", gate)
+    print("Status:", status)
+    print("Time:", current_time)
+    print("=" * 40)
 
     return jsonify({
-        "message": "Alert received successfully",
+        "message": "Alert Received",
         "event_id": event_id,
         "gate": gate,
         "status": status,
         "time": current_time
-    })
+    }), 201
 
 
-# ==============================
-# VIEW EVENTS
-# ==============================
+# =========================================================
+# PHASE 3 — WEB DASHBOARD EVENTS
+# Existing endpoint; returns a JSON array.
+# =========================================================
 
 @app.route("/events", methods=["GET"])
 def get_events():
+    conn = get_connection()
 
-    conn = sqlite3.connect(DATABASE)
+    try:
+        rows = conn.execute("""
+            SELECT id, gate, status, time, drone_status
+            FROM events
+            ORDER BY id DESC
+            LIMIT 200
+        """).fetchall()
 
-    cursor = conn.cursor()
+        return jsonify([dict(row) for row in rows])
 
-    cursor.execute("""
-        SELECT id, gate, status, time
-        FROM events
-        ORDER BY id DESC
-    """)
+    finally:
+        conn.close()
 
-    rows = cursor.fetchall()
 
-    conn.close()
+# =========================================================
+# ANDROID APP API — GATE STATUS
+# Returns the latest event for each gate.
+# =========================================================
 
-    events = []
+@app.route("/api/gates", methods=["GET"])
+def api_gates():
+    conn = get_connection()
 
-    for row in rows:
+    try:
+        rows = conn.execute("""
+            SELECT gate, status, time
+            FROM events
+            ORDER BY id DESC
+        """).fetchall()
 
-        events.append({
-            "id": row[0],
-            "gate": row[1],
-            "status": row[2],
-            "time": row[3]
+        latest_by_gate = {}
+
+        for row in rows:
+            gate = row["gate"]
+
+            if gate not in latest_by_gate:
+                latest_by_gate[gate] = {
+                    "gate": gate,
+                    "status": row["status"],
+                    "timestamp": row["time"]
+                }
+
+        return jsonify({
+            "success": True,
+            "gates": list(latest_by_gate.values())
         })
 
-    return jsonify(events)
+    finally:
+        conn.close()
 
 
-# ==============================
-# RUN SERVER
-# ==============================
+# =========================================================
+# ANDROID APP API — RECENT EVENTS
+# Returns the latest 50 events in Android app format.
+# =========================================================
+
+@app.route("/api/events", methods=["GET"])
+def api_events():
+    conn = get_connection()
+
+    try:
+        rows = conn.execute("""
+            SELECT id, gate, status, time
+            FROM events
+            ORDER BY id DESC
+            LIMIT 50
+        """).fetchall()
+
+        events = [
+            {
+                "id": row["id"],
+                "gate": row["gate"],
+                "status": row["status"],
+                "timestamp": row["time"]
+            }
+            for row in rows
+        ]
+
+        return jsonify({
+            "success": True,
+            "events": events
+        })
+
+    finally:
+        conn.close()
+
+
+# =========================================================
+# PHASE 4 — GET NEXT DRONE MISSION
+# =========================================================
+
+@app.route("/drone/mission", methods=["GET"])
+def get_drone_mission():
+    conn = get_connection()
+
+    try:
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT id, gate, status, time
+            FROM events
+            WHERE drone_status = 'PENDING'
+            ORDER BY id ASC
+            LIMIT 1
+        """)
+
+        row = cursor.fetchone()
+
+        if row is None:
+            return jsonify({"mission": None})
+
+        event_id = row["id"]
+        gate = row["gate"]
+        status = row["status"]
+        event_time = row["time"]
+
+        gate_text = str(gate).upper()
+        status_text = str(status).upper()
+
+        if "1" in gate_text:
+            gate_number = 1
+        elif "2" in gate_text:
+            gate_number = 2
+        elif "3" in gate_text:
+            gate_number = 3
+        else:
+            return jsonify({
+                "mission": None,
+                "message": "Gate is not recognized"
+            })
+
+        eligible_statuses = (
+            "OPEN",
+            "TRIGGER",
+            "INTRUSION",
+            "ALERT"
+        )
+
+        if not any(
+            word in status_text
+            for word in eligible_statuses
+        ):
+            return jsonify({
+                "mission": None,
+                "message": "Event is not an eligible alert"
+            })
+
+        cursor.execute("""
+            UPDATE events
+            SET drone_status = 'DISPATCHED'
+            WHERE id = ? AND drone_status = 'PENDING'
+        """, (event_id,))
+
+        if cursor.rowcount != 1:
+            conn.rollback()
+            return jsonify({"mission": None})
+
+        conn.commit()
+
+        print("=" * 40)
+        print("DRONE MISSION DISPATCHED")
+        print("Event ID:", event_id)
+        print("Gate:", gate_number)
+        print("Status:", status)
+        print("=" * 40)
+
+        return jsonify({
+            "mission": f"GATE{gate_number}_TRIGGERED",
+            "gate": gate_number,
+            "event_id": event_id,
+            "status": status,
+            "time": event_time
+        })
+
+    finally:
+        conn.close()
+
+
+# =========================================================
+# PHASE 4 — UPDATE DRONE MISSION STATUS
+# =========================================================
+
+@app.route(
+    "/drone/mission/<int:event_id>/status",
+    methods=["POST"]
+)
+def update_drone_status(event_id):
+    data = request.get_json(silent=True)
+
+    if not isinstance(data, dict):
+        return jsonify({
+            "error": "Request body must be valid JSON"
+        }), 400
+
+    new_status = str(
+        data.get("drone_status", "")
+    ).upper()
+
+    allowed_statuses = {
+        "DISPATCHED",
+        "IN_PROGRESS",
+        "COMPLETED",
+        "FAILED",
+        "CANCELLED"
+    }
+
+    if new_status not in allowed_statuses:
+        return jsonify({
+            "error": "Invalid drone_status",
+            "allowed": sorted(allowed_statuses)
+        }), 400
+
+    conn = get_connection()
+
+    try:
+        cursor = conn.execute("""
+            UPDATE events
+            SET drone_status = ?
+            WHERE id = ?
+        """, (new_status, event_id))
+
+        conn.commit()
+
+        if cursor.rowcount == 0:
+            return jsonify({
+                "error": "Event not found",
+                "event_id": event_id
+            }), 404
+
+        return jsonify({
+            "message": "Drone status updated",
+            "event_id": event_id,
+            "drone_status": new_status
+        })
+
+    finally:
+        conn.close()
+
+
+# =========================================================
+# SERVER
+# =========================================================
 
 if __name__ == "__main__":
-
-    init_db()
-
-    print("\n====================================")
-    print(" GARUDA PHASE 3 SERVER")
-    print("====================================")
-    print("Flask Server : http://127.0.0.1:5000")
-    print("Alert API    : /alert")
-    print("Events API   : /events")
-    print("Telegram Bot : Enabled")
-    print("Database     : security.db")
-    print("====================================\n")
+    print("=" * 45)
+    print("GARUDA SECURITY SERVER STARTING")
+    print("Dashboard:   http://127.0.0.1:5000/")
+    print("Web events:  http://127.0.0.1:5000/events")
+    print("Android gates: http://127.0.0.1:5000/api/gates")
+    print("Android events: http://127.0.0.1:5000/api/events")
+    print("Drone mission: http://127.0.0.1:5000/drone/mission")
+    print("=" * 45)
 
     app.run(
         host="0.0.0.0",
         port=5000,
-        debug=True
+        debug=False
     )
